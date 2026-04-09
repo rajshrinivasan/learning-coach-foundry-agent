@@ -1,0 +1,335 @@
+AGENT ARCHITECTURE INTERVIEW QUESTIONS & ANSWERS
+Based on: Personal Learning Coach project (agent.py, profile_store.py, app.py)
+Pattern: Stateful Personalization with Azure AI Agents
+======================================================
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 1 — Core Agent Concepts
+──────────────────────────────────────────────────────────────────────────────
+
+Q1. What is an AI agent (as distinct from a simple LLM API call)?
+
+A: An LLM API call is stateless and one-shot: you send a prompt, get a
+   response, done. An agent adds a loop: the model can call tools, inspect
+   results, and continue reasoning before returning a final answer.
+   In this project, CoachSession.send() runs a while loop that polls the
+   run status. When the agent decides to call update_profile(), the SDK
+   pauses the run, returns `requires_action`, the Python code executes the
+   tool, submits the result, and the run continues. The model sees the tool
+   result and uses it in its next token generation.
+
+   Key distinction: the model controls when tools are called. The Python
+   code just executes what the model requests.
+
+
+Q2. What is a "thread" in the Azure AI Agents context?
+
+A: A thread is a persistent conversation history — a list of messages
+   (user, assistant, tool) stored server-side. Each call to
+   messages.create() adds a message to the thread; each run processes
+   the thread's full history.
+
+   In this project, threads are EPHEMERAL: a new thread is created in
+   start() and discarded (implicitly) in close(). The thread holds the
+   conversation for one session only. Persistence across sessions comes
+   from the JSON profile, not the thread.
+
+   Why ephemeral threads? Memory stays bounded. If threads accumulated
+   across hundreds of sessions, the context window would overflow and
+   costs would grow unbounded.
+
+
+Q3. What is an "agent" (resource) vs. a "run"?
+
+A: Agent: a server-side resource that defines the model, instructions
+   (system prompt), and available tools. Created once per session in
+   start() via create_agent(). Deleted in close() via delete_agent().
+
+   Run: a single execution against a thread. Created in send() via
+   runs.create(thread_id, agent_id). A run processes all messages in
+   the thread, invokes tools as needed, and produces a final assistant
+   message. Multiple sends() create multiple runs against the same thread.
+
+   One agent + one thread → many runs (one per user message).
+
+
+Q4. What is the agent run lifecycle / state machine?
+
+A: A run moves through these states:
+
+     queued → in_progress → [requires_action] → in_progress → completed
+                                                             ↘ failed
+
+   queued:          Waiting to be picked up by the backend
+   in_progress:     Model is generating tokens
+   requires_action: Model has called a tool — Python must execute it and
+                    submit results via submit_tool_outputs()
+   completed:       Final assistant message is available
+   failed:          Something went wrong — check run.last_error
+
+   CoachSession.send() polls this state machine:
+     while run.status in ("queued", "in_progress", "requires_action"):
+         if _has_tool_calls(run):
+             outputs = _dispatch(run)
+             run = submit_tool_outputs(...)
+         else:
+             run = runs.get(...)   # re-poll
+
+
+Q5. What happens if the Python code fails to submit tool outputs?
+
+A: The run will eventually time out or stall in requires_action state.
+   The agent cannot proceed without the tool results — it literally waits.
+   If the Python process crashes, the run is stuck. This is why close()
+   deletes the agent: it signals to the backend that the session is over
+   and prevents dangling resources. In production systems you would also
+   cancel the run explicitly.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 2 — Tools and Function Calling
+──────────────────────────────────────────────────────────────────────────────
+
+Q6. How does the model know what tools are available and how to call them?
+
+A: Tools are registered as JSON Schema definitions (function signatures +
+   descriptions) attached to the agent at creation time via
+   toolset.definitions. The model is trained to output structured JSON
+   when it decides to call a tool — it emits the function name and
+   arguments in a special format that the SDK surfaces as
+   run.required_action.submit_tool_outputs.tool_calls.
+
+   In this project, FunctionTool({self.ctx.update_profile, ...}) inspects
+   the Python function signatures (parameter names, type hints, docstrings)
+   and generates the schema automatically. The docstring becomes the tool
+   description the model reads.
+
+
+Q7. Why are docstrings critically important for function tools?
+
+A: The model reads the docstring as the tool's description and argument
+   documentation. A vague or missing docstring means the model doesn't
+   know when or how to call the tool. In update_profile(), the docstring
+   explicitly lists all valid field names and their formats — this is the
+   model's only reference for how to call the function correctly.
+
+   "update_profile(field, value)" with no docstring → model may call it
+   with wrong field names or wrong value formats → silent bugs (profile
+   not updated, or updated incorrectly).
+
+
+Q8. What is the role of _dispatch() and why is it structured as a dict lookup?
+
+A: When the model calls a tool, the SDK gives Python the function name as
+   a STRING (e.g., "update_profile") and arguments as a JSON string.
+   _dispatch() maps names to actual callables via a dict:
+
+     fn_map = {
+         "update_profile": self.ctx.update_profile,
+         "get_profile_summary": self.ctx.get_profile_summary,
+     }
+     result = fn_map[fn_name](**json.loads(fn_args))
+
+   Dict lookup is O(1) and scales cleanly to many tools. Alternatives like
+   getattr(self.ctx, fn_name) are dangerous — they'd allow the model to
+   call any method on the object, not just the registered tools (a security
+   risk). The explicit dict is the safer, more intentional approach.
+
+
+Q9. What does submit_tool_outputs() do and what format does it expect?
+
+A: It resumes a paused run by providing the results of tool calls.
+   It expects a list of dicts, each with:
+     {"tool_call_id": <id from the run>, "output": <string result>}
+   The tool_call_id must match exactly — it's how the model knows which
+   tool call this result corresponds to (there can be multiple parallel
+   tool calls in one requires_action step). The output must be a string;
+   complex return values should be JSON-serialized.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 3 — Stateful Personalization Pattern
+──────────────────────────────────────────────────────────────────────────────
+
+Q10. What is the "Stateful Personalization" pattern and what problem does
+     it solve?
+
+A: Standard LLM sessions are stateless: each conversation starts blank.
+   Stateful Personalization solves this by maintaining a user profile that
+   persists between sessions.
+
+   The pattern works as:
+     Session start  → load profile from disk → inject into system prompt
+     During session → agent updates profile via tool calls
+     Session end    → save updated profile to disk
+
+   Next session opens already knowing the learner's name, goals, topics
+   covered, level, and preferred style. The conversation thread is
+   discarded; only the profile survives. This keeps the agent "smart"
+   across sessions while keeping per-session costs bounded.
+
+
+Q11. Why is the profile injected into the system prompt rather than
+     retrieved via a tool call?
+
+A: Speed and reliability. If the profile were a tool call, the agent would
+   need an extra round-trip at session start ("let me check the profile")
+   before it could greet the user appropriately. Injecting at construction
+   time means the model has the full profile as part of its instructions
+   from turn one — no tool call latency, no risk of forgetting to check.
+
+   The README calls this "profile injection at construction time":
+     system_prompt = RAW_SYSTEM_PROMPT.replace("{PROFILE}", context)
+   The {PROFILE} placeholder is replaced once, before the agent is created.
+   The profile is baked into the model's "world model" for the session.
+
+
+Q12. Why is the profile stored as JSON in files rather than in the thread?
+
+A: Three reasons:
+   1. Threads are ephemeral and discarded at session end. Profile data
+      stored in the thread would be lost.
+   2. Thread context is consumed by the model — large profiles would eat
+      into the context window leaving less room for the conversation.
+   3. Files are portable and replaceable: profile_store.py exposes
+      load(), save(), to_prompt_context(), and record_session(). Any
+      backend (CosmosDB, PostgreSQL, Redis) can replace the file store
+      without changing agent.py or app.py at all.
+
+
+Q13. What is the update_profile() tool's "append-only" design and why does
+     it matter?
+
+A: Goals (learning_goals) and notes are only appended, never overwritten.
+   Only name, preferred_style, and topic_level can replace existing values.
+   This is intentional:
+
+   - If the agent could delete goals, a misunderstanding could wipe a
+     learner's stated objectives.
+   - Append-only creates an audit trail: you can see how the learner
+     evolved over time.
+   - It prevents the model from accidentally "resetting" progress by
+     re-calling with an empty list.
+
+   The safe update rule: overwrite only scalar fields, always append
+   to lists.
+
+
+Q14. What is a "session record" and what information does it capture?
+
+A: Each time close() runs with at least one exchange, record_session()
+   appends an entry to profile["sessions"]:
+     {"date": "2026-04-09", "topics_touched": ["python"], "summary": "..."}
+   It also increments session_count and sets last_session.
+
+   The project retains only the last 10 session records. Older records
+   are trimmed via list slicing: profile["sessions"] = sessions[-10:]
+   This bounds storage and keeps the context injected from to_prompt_context()
+   from growing unbounded.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 4 — Multi-turn Conversation Design
+──────────────────────────────────────────────────────────────────────────────
+
+Q15. How does the system prompt shape agent behavior beyond just providing
+     the profile?
+
+A: system_prompt.txt defines five behavioral layers:
+   1. Personalization rules — skip covered topics, match style, reference
+      past sessions, adjust difficulty
+   2. Session opening script — what the greeting must contain (3 elements)
+   3. When to call update_profile() — triggering conditions per tool call
+   4. Teaching approach — lead with concept → example → check question
+   5. Profile injection — the {PROFILE} block the agent reads
+
+   Each layer constrains a different aspect of agent behavior. The model
+   follows these instructions as soft rules (it can deviate), so they
+   must be clear and specific. Vague instructions like "be helpful" produce
+   inconsistent behavior; concrete instructions like "do not re-teach topics
+   already in covered[]" produce reliable behavior.
+
+
+Q16. Why does the system prompt say "Do not call update_profile() more than
+     once per turn"?
+
+A: If the model could call update_profile() multiple times per turn, it
+   would create multiple requires_action cycles per user message, making
+   the polling loop more complex and slower. More importantly, it prevents
+   the model from making redundant or contradictory profile updates in a
+   single response. One update per turn is a rate-limiting constraint that
+   keeps the profile coherent and the implementation simple.
+
+
+Q17. What is the difference between a "stateless" and "stateful" agent?
+
+A: Stateless agent: every request is independent. No memory of previous
+   requests. Simple, scalable, but cannot personalize.
+
+   Stateful agent: maintains context across requests. In this project,
+   stateful at two levels:
+   - Within a session: the thread accumulates messages; each run sees the
+     full conversation history
+   - Across sessions: the JSON profile persists learner data between
+     separate runs of the program
+
+   The tradeoff: statefulness adds complexity (profile management, storage,
+   consistency concerns) in exchange for personalization capability.
+
+
+Q18. What happens architecturally when a user runs `python agent.py` for
+     the second time with the same user_id?
+
+A: Session 2 lifecycle:
+   1. profile_store.load("alex") → reads alex.json from disk → populated
+      profile with name, goals, topics, session count = 1
+   2. profile_store.to_prompt_context(profile) → renders text block
+   3. RAW_SYSTEM_PROMPT.replace("{PROFILE}", context) → system prompt now
+      includes all prior session data
+   4. create_agent() with that system prompt → model "knows" Alex before
+      the first user message
+   5. New thread created (no memory of session 1 conversation text)
+   6. First message: model greets Alex by name, references last session,
+      suggests next topic — all from the injected profile
+   7. At close(): session 2 record appended, profile saved as session_count=2
+
+   The conversation text from session 1 is completely gone (ephemeral
+   thread). The structured learning profile is the only continuity.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 5 — Architecture Trade-offs
+──────────────────────────────────────────────────────────────────────────────
+
+Q19. What are the limitations of the current single-file JSON profile store?
+
+A: Three main limitations:
+   1. Concurrency: os.replace() on Windows is not guaranteed atomic.
+      If two sessions for the same user run simultaneously, a race condition
+      could corrupt the profile. A database with row-level locking would fix this.
+   2. Scalability: File-per-user works fine for hundreds of users; it does
+      not scale to millions. A database backend (CosmosDB, PostgreSQL) is
+      needed at scale.
+   3. Queryability: You can't easily query "all users who covered Python"
+      without reading every JSON file. A database enables this.
+
+   The code is designed with this in mind — profile_store.py is the only
+   module that touches storage. Swapping backends requires changing only
+   this one file.
+
+
+Q20. How would you extend this agent to support multiple concurrent users
+     in a web application?
+
+A: Three changes needed:
+   1. Storage: Replace file-based profiles with a proper database
+      (e.g., CosmosDB) that handles concurrent reads/writes safely.
+   2. Session isolation: Each HTTP request/websocket connection must
+      maintain its own CoachSession object. In app.py, gr.State() already
+      does this for Gradio — each browser tab gets its own state dict.
+      For a REST API, sessions would be keyed by user_id + session token.
+   3. Azure agent lifecycle: Currently one Azure agent is created per
+      session and deleted at close(). At scale, creating agents on every
+      request adds latency. Consider a pool of pre-created agents with
+      dynamic thread assignment, or use stateless runs with thread IDs
+      managed client-side.
+
+   The key architectural insight: agent.py's CoachSession already models
+   a single-user session cleanly. The multi-user problem is a deployment
+   and storage problem, not an agent logic problem.

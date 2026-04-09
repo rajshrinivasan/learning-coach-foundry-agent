@@ -1,0 +1,17 @@
+{
+  "user_id": "default",
+  "name": "",
+  "learning_goals": [],
+  "topics": {},
+  "preferred_style": "balanced",
+  "notes": [],
+  "session_count": 1,
+  "last_session": "2026-04-08",
+  "sessions": [
+    {
+      "date": "2026-04-08",
+      "topics_touched": [],
+      "summary": "Covered: general discussion. 1 exchanges."
+    }
+  ]
+}

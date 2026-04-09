@@ -1,0 +1,309 @@
+PYTHON INTERVIEW QUESTIONS & ANSWERS
+Based on: Personal Learning Coach project (agent.py, profile_store.py, app.py)
+Level: Intermediate to Advanced
+======================================================
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 1 — Dataclasses
+──────────────────────────────────────────────────────────────────────────────
+
+Q1. What is a @dataclass and why is it used instead of a plain class in
+    SessionContext?
+
+A: A @dataclass is a decorator that auto-generates __init__, __repr__, and
+   __eq__ from annotated class attributes. In SessionContext it removes
+   boilerplate — instead of writing `def __init__(self, profile, session_topics=None)`,
+   the decorator generates it. The field(default_factory=list) argument is
+   critical: it ensures each instance gets its own fresh list rather than
+   sharing a single mutable default (the classic mutable-default-argument bug).
+
+   Without field(default_factory=list):
+     session_topics: list = []   # WRONG — all instances share one list
+
+   With it:
+     session_topics: list[str] = field(default_factory=list)  # correct
+
+
+Q2. What is the mutable default argument bug and how does field() prevent it?
+
+A: If you write `def __init__(self, items=[])`, all calls that don't pass
+   items share the SAME list object. Mutations in one instance affect all.
+   field(default_factory=list) tells @dataclass to call list() for each
+   new instance, producing a separate object every time.
+
+   Example of the bug:
+     class Bad:
+         data: list = []   # shared across all instances!
+     a, b = Bad(), Bad()
+     a.data.append(1)
+     print(b.data)  # [1] — bug
+
+   With dataclass + field:
+     @dataclass
+     class Good:
+         data: list = field(default_factory=list)
+     a, b = Good(), Good()
+     a.data.append(1)
+     print(b.data)  # [] — correct
+
+
+Q3. How do you add post-construction validation to a @dataclass?
+
+A: Override __post_init__. It runs automatically after the generated
+   __init__ finishes:
+
+     @dataclass
+     class Profile:
+         style: str = "balanced"
+         VALID = {"concise", "detailed", "example-heavy", "balanced"}
+
+         def __post_init__(self):
+             if self.style not in self.VALID:
+                 raise ValueError(f"Invalid style: {self.style}")
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 2 — Pathlib and File I/O
+──────────────────────────────────────────────────────────────────────────────
+
+Q4. Why does profile_store.py use Path(__file__).parent instead of a
+    hardcoded string like "profiles/"?
+
+A: __file__ is the absolute path of the running module. Using
+   Path(__file__).parent anchors paths relative to the module's location,
+   not the process's current working directory (cwd). If you run the script
+   from a different directory (e.g., `python src/profile_store.py`), a
+   relative path like "profiles/" would resolve against the wrong cwd.
+   Path(__file__).parent always points to the directory containing the file,
+   regardless of where Python was launched from.
+
+
+Q5. What does path / "profiles" do and why is it preferred over os.path.join?
+
+A: Pathlib overloads the / operator for path joining. It is equivalent to
+   os.path.join() but more readable and returns a Path object (not a string),
+   which has useful methods: .exists(), .read_text(), .mkdir(), etc.
+
+   os.path.join("profiles", f"{user_id}.json")  # returns str
+   PROFILES_DIR / f"{user_id}.json"              # returns Path — preferred
+
+
+Q6. What is an atomic write and how does profile_store.py implement it?
+
+A: An atomic write guarantees the destination file is either fully written
+   or completely unchanged — there is no in-between corrupt state.
+
+   profile_store.py's save() implementation:
+     1. tempfile.mkstemp() creates a unique temp file in the same directory
+        (same filesystem = same device) and returns (fd, tmp_path)
+     2. os.fdopen(fd, "w") wraps the raw file descriptor in a Python file
+        object — important because mkstemp() returns an OS-level fd, not a
+        Python file
+     3. json.dump() writes the data to the temp file
+     4. os.replace(tmp_path, path) atomically swaps the temp file into the
+        final location
+
+   Why same directory? os.replace() is only atomic on POSIX when both
+   paths are on the same filesystem. Putting the temp file in the same
+   directory as the target guarantees this.
+
+   On POSIX: os.replace() calls rename(), which is atomic.
+   On Windows: it is "best-effort" — not guaranteed atomic but still
+   safer than an in-place write.
+
+
+Q7. What is the difference between open(path) and os.fdopen(fd)?
+
+A: open() takes a file path (string or Path) and opens it.
+   os.fdopen() wraps an already-open OS-level file descriptor (an integer)
+   in a Python file object. tempfile.mkstemp() returns an fd, not a path,
+   so os.fdopen() is required to get Python's buffering, encoding handling,
+   and context manager support.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 3 — Dict Operations
+──────────────────────────────────────────────────────────────────────────────
+
+Q8. What does dict.setdefault() do and when is it better than if/else?
+
+A: setdefault(key, default) returns the value for key if it exists;
+   otherwise inserts key with default and returns default. It is a single
+   atomic lookup+insert, cleaner than the pattern:
+
+     if "topics" not in profile:
+         profile["topics"] = {}
+     profile["topics"]...
+
+   Replaces with:
+     profile.setdefault("topics", {})...
+
+   In profile_store.py it is chained:
+     p.setdefault("topics", {}).setdefault(subject, {})["level"] = level
+   Each setdefault creates the nested dict only if it doesn't exist yet.
+
+
+Q9. What does dict.fromkeys() do and why is it used in CoachSession.close()?
+
+A: dict.fromkeys(iterable) creates a dict with keys from the iterable and
+   None as every value. Since dicts preserve insertion order (Python 3.7+),
+   calling list(dict.fromkeys(seq)) deduplicates seq while preserving the
+   order of first occurrence — something list(set()) does NOT guarantee.
+
+   In close():
+     topics = list(dict.fromkeys(self.ctx.session_topics))
+   If session_topics = ["python", "sql", "python", "sql"], this gives
+   ["python", "sql"] — order preserved, duplicates removed.
+
+
+Q10. What does {**DEFAULT_PROFILE, "user_id": user_id, ...} do?
+
+A: The ** operator unpacks a dict into keyword arguments (or into another
+   dict literal). This creates a shallow copy of DEFAULT_PROFILE and then
+   overrides specific keys. It is equivalent to:
+
+     profile = dict(DEFAULT_PROFILE)
+     profile["user_id"] = user_id
+
+   But more concise. "Shallow copy" means nested objects (lists, dicts)
+   are still shared — that's why profile_store.py explicitly resets
+   "learning_goals": [], "topics": {}, etc., rather than relying on the
+   copy to give independent nested objects.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 4 — String Operations
+──────────────────────────────────────────────────────────────────────────────
+
+Q11. Why does value.split(":", 1) use maxsplit=1 instead of split(":")?
+
+A: maxsplit=1 stops after the first split, producing at most 2 parts.
+   This correctly handles values that themselves contain colons, e.g.:
+     "python:http://example.com"  → ["python", "http://example.com"]
+   Without maxsplit=1:
+     "python:http://example.com"  → ["python", "http", "//example.com"]
+   The profile field "topic_covered" with format "subject:topic" must use
+   maxsplit=1 so topics like "python:list comprehensions" work correctly
+   (no colon in topic), but it's defensive programming for edge cases.
+
+
+Q12. What does str.strip() return and when does it matter?
+
+A: strip() returns a new string with leading and trailing whitespace removed.
+   In _split_subject_value(), parts[0].strip() and parts[1].strip() ensure
+   that " python : intermediate " parses correctly even with extra spaces.
+   Strings are immutable in Python — strip() returns a new string.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 5 — Type Hints
+──────────────────────────────────────────────────────────────────────────────
+
+Q13. What does tuple[str, str] | None mean as a return type hint?
+
+A: It uses the union syntax (Python 3.10+). The function returns either a
+   tuple of two strings OR None. Before 3.10 you'd write:
+     Optional[Tuple[str, str]]  from typing import Optional, Tuple
+   The | syntax is cleaner and works for isinstance() checks too:
+     isinstance(x, str | int)  # True if x is str or int
+
+   In _split_subject_value(), None signals "bad format — caller should
+   check before unpacking".
+
+
+Q14. What is CoachSession | None as a type hint and where is it used?
+
+A: In app.py: `session: CoachSession | None = state.get("session")`
+   It tells type checkers and readers that session may be None (not yet
+   started or already closed). Before 3.10: Optional[CoachSession].
+   Using it forces you to handle the None case explicitly, which is exactly
+   what the code does: `if not session: return ...`.
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 6 — Error Handling and Logging
+──────────────────────────────────────────────────────────────────────────────
+
+Q15. Why use logging.getLogger(__name__) instead of print()?
+
+A: __name__ equals the module's fully qualified name (e.g., "profile_store"),
+   so log messages automatically show which module they came from.
+   Logging levels (DEBUG, INFO, WARNING, ERROR) let you suppress or capture
+   messages without changing code. print() always goes to stdout; logging
+   can route to files, external systems, or be silenced entirely.
+   In production, print() is almost always the wrong choice for
+   observability.
+
+
+Q16. What is the purpose of try/finally in the CLI main() function?
+
+A: finally guarantees the block runs whether the try block exits normally
+   or via an exception (including KeyboardInterrupt from Ctrl+C).
+   In agent.py's main():
+
+     try:
+         session.start()
+         while True:
+             ...
+     finally:
+         summary = session.close()
+
+   If the user presses Ctrl+C mid-session, session.close() still runs:
+   the profile is saved and Azure resources are cleaned up. Without
+   finally, an unexpected exception would leak the agent and thread
+   in Azure.
+
+
+Q17. What is the difference between raise and raise e in an except block?
+
+A: raise (bare) re-raises the current exception, preserving the original
+   traceback. raise e raises the caught exception but may reset the
+   traceback, making debugging harder. Always prefer bare raise when you
+   just want to re-raise after logging:
+
+     try:
+         ...
+     except OSError as e:
+         log.error("Failed: %s", e)
+         raise        # preserves original traceback — correct
+         # raise e    # would lose some traceback context
+
+──────────────────────────────────────────────────────────────────────────────
+SECTION 7 — OOP and Class Design
+──────────────────────────────────────────────────────────────────────────────
+
+Q18. What is the difference between a method and a function in the
+     update_profile() dispatch?
+
+A: In _dispatch(), fn_map maps string names to bound methods:
+     fn_map = {"update_profile": self.ctx.update_profile, ...}
+   self.ctx.update_profile IS a bound method — it already has self.ctx
+   baked in. When called as fn_map["update_profile"](**fn_args), it
+   behaves exactly like self.ctx.update_profile(**fn_args). This is
+   first-class functions: methods are objects you can store in dicts
+   and call later.
+
+
+Q19. Why does CoachSession separate _has_tool_calls() and _dispatch() into
+     private methods?
+
+A: Single responsibility and testability. The polling loop in send() handles
+   the state machine (queued → in_progress → requires_action → complete).
+   _has_tool_calls() isolates the condition check — easy to read and easy
+   to test in isolation without running a full loop. _dispatch() isolates
+   the tool execution — it can be tested by passing a mock run object.
+   Methods prefixed with _ are a convention signaling "internal use only",
+   not enforced by Python but respected by linters and IDEs.
+
+
+Q20. What is the difference between a class variable and an instance variable?
+
+A: Class variables (defined in the class body, outside __init__) are shared
+   across all instances. Instance variables (assigned in __init__ or methods
+   via self.x = ...) are unique per instance.
+
+   In profile_store.py:
+     _MAX_NOTES = 20          # module-level constant — not a class var
+     DEFAULT_PROFILE: dict = {...}  # same
+
+   In CoachSession:
+     self.user_id = user_id   # instance variable — unique per session
+     self.turn = 0            # instance variable
+
+   Mutable class variables (like lists or dicts) are a common bug source
+   because mutations affect all instances.

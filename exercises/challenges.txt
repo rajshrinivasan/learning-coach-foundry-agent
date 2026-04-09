@@ -1,0 +1,185 @@
+PRACTICE CHALLENGES — Personal Learning Coach Project
+======================================================
+Based on: agent.py, profile_store.py, app.py
+Level: Intermediate to Advanced Python
+Your level: Comfortable with basic Python and OOP
+
+Each challenge is a standalone mini-project. No boilerplate provided —
+build it from scratch so every line is yours.
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 1 — Atomic JSON Store
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A module `json_store.py` that saves any dict to a file atomically.
+  Support: save(data, path), load(path, default=None).
+  If a write is interrupted mid-way, the existing file must be uncorrupted.
+
+Python features to use:
+  - tempfile.mkstemp() to get a file descriptor + temp path
+  - os.fdopen() to wrap the raw fd in a Python file object
+  - os.replace() for the atomic rename (study what "atomic" means on
+    POSIX vs Windows — document the difference in a comment)
+  - json.dump() / json.load()
+  - pathlib.Path for all path construction (no string concatenation)
+  - try/except OSError — re-raise after logging
+
+Goal:
+  Understand why `open(path, "w")` is NOT safe for critical files and how
+  write-to-temp + rename gives you crash safety. Know exactly what
+  os.replace() guarantees and when it doesn't.
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 2 — Profile Dataclass with Validation
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A @dataclass called LearnerProfile that mirrors the profile schema.
+  It must enforce:
+    - preferred_style is one of: concise, detailed, example-heavy, balanced
+    - notes list never exceeds 20 entries (drop oldest)
+    - sessions list never exceeds 10 entries (drop oldest)
+    - topics is a nested dict with structure {subject: {level, covered[]}}
+  Provide: add_note(), add_goal(), set_topic_level(), mark_covered() methods.
+  Provide: to_dict() / from_dict() for JSON round-tripping.
+
+Python features to use:
+  - @dataclass with field(default_factory=list) and field(default_factory=dict)
+  - __post_init__() for validation
+  - Type annotations including dict[str, dict], list[str], and the new
+    union syntax (str | None)
+  - A class-level constant (VALID_STYLES: frozenset)
+  - Slicing to trim lists: self.notes = self.notes[-20:]
+
+Goal:
+  Understand when @dataclass is better than a plain dict, how
+  default_factory prevents the mutable-default-argument bug, and how
+  __post_init__ gives you a constructor hook without overriding __init__.
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 3 — Dynamic Tool Dispatcher
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A class Dispatcher that:
+    - Accepts a dict mapping string names → callables at construction time
+    - Has a dispatch(name, kwargs_dict) method that looks up the function,
+      calls it with **kwargs, and returns the result
+    - Raises a clear KeyError subclass (UnknownToolError) if name not found
+    - Logs every call: [tool:name] result
+
+  Mirror exactly what _dispatch() in agent.py does, but make it reusable
+  and testable in isolation.
+
+Python features to use:
+  - dict lookup and **kwargs unpacking from a parsed dict
+  - json.loads() to parse a JSON argument string into a dict
+  - A custom exception class (class UnknownToolError(KeyError))
+  - logging.getLogger(__name__) — use module-level logger
+  - Unit test it: write 3 test functions (no framework needed, just assert)
+
+Goal:
+  Understand function dispatch by name (used in every agent tool loop),
+  how **kwargs unpacking works, and why custom exception subclasses are
+  more useful than plain strings.
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 4 — setdefault() Chain Builder
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A function deep_set(d, path, value) that sets a value in a nested dict
+  using a dot-separated path string, creating intermediate dicts as needed.
+  Example: deep_set({}, "topics.python.level", "intermediate")
+  → {"topics": {"python": {"level": "intermediate"}}}
+
+  Then a function deep_get(d, path, default=None) that retrieves it.
+  Both must work for arbitrary depth.
+
+Python features to use:
+  - str.split(".") to parse the path
+  - dict.setdefault() in a loop — understand why this is cleaner than
+    manual "if key not in d" checks
+  - Slicing: path_parts[:-1] for the container, path_parts[-1] for the key
+  - Write 5 assert-based tests covering: create, overwrite, missing key,
+    empty path (raise ValueError), and a 4-level deep path
+
+Goal:
+  Master setdefault() — the same pattern used throughout profile_store.py
+  and agent.py. Understand the difference between setdefault, get, and
+  direct assignment, and when each is the right choice.
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 5 — Environment Config Loader
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A module config.py with:
+    - load_env(path) — reads a .env file manually (no python-dotenv), parses
+      KEY=VALUE lines, strips quotes, ignores # comments and blank lines,
+      and calls os.environ.setdefault() for each key (don't overwrite).
+    - require(name) — returns os.environ[name] or raises RuntimeError with
+      a helpful message that names the missing variable and hints at the
+      .env file location (mirror _require_env() in agent.py but make it
+      reusable)
+    - get_all(names: list[str]) → dict[str, str] — calls require() for each
+      and returns them as a dict in one call
+
+Python features to use:
+  - pathlib.Path.read_text() and splitlines()
+  - str.strip(), str.startswith(), str.split("=", 1) (note the maxsplit=1)
+  - os.environ.setdefault() vs os.environ[] — understand the difference
+  - Raising RuntimeError with an f-string that includes context
+  - Type annotations throughout
+
+Goal:
+  Understand how python-dotenv works under the hood. Know why maxsplit=1
+  matters for values that contain "=". Know why setdefault is the right
+  call (don't clobber real env vars that the shell already set).
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 6 — Ordered Deduplication Utility
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A function unique_ordered(items: list) -> list that returns the list with
+  duplicates removed, preserving first-occurrence order.
+  Then explain in a comment WHY dict.fromkeys(items) achieves this, and what
+  guarantee Python 3.7+ dicts give about insertion order.
+  Finally, write a benchmark comparing dict.fromkeys(), a seen-set loop,
+  and list(set()) across lists of 10, 1000, and 100000 integers — print a
+  table of results.
+
+Python features to use:
+  - dict.fromkeys() — the idiom from agent.py's close()
+  - list(dict.fromkeys(items)) pattern
+  - time.perf_counter() for micro-benchmarking
+  - f-string formatting: f"{value:>10.4f}" for aligned columns
+  - A nested loop over sizes and implementations
+
+Goal:
+  Deeply understand dict.fromkeys() — why it works, what it costs, and when
+  to prefer a set. Know that Python 3.7+ dicts are ordered by spec (not
+  just CPython implementation detail).
+
+──────────────────────────────────────────────────────────────────────────────
+CHALLENGE 7 — Stateful Session Manager (mini-version of CoachSession)
+──────────────────────────────────────────────────────────────────────────────
+What to build:
+  A class Session that:
+    - Takes a user_id and a callable "backend" (a function that takes a
+      string prompt and returns a string response — pass a lambda for testing)
+    - Has start(), send(message) -> str, and close() -> dict methods
+    - Tracks turn count and a list of "topics touched" (simulate by parsing
+      any word after "topic:" in the message)
+    - close() returns {"turns": n, "topics": [...deduped...], "saved": True}
+    - Uses a try/finally pattern so close() always runs even if send() raises
+    - Raises RuntimeError("Session not started") if send() is called before
+      start()
+
+Python features to use:
+  - Instance state managed across methods (self._started, self._turns, etc.)
+  - try/finally in the CLI loop (mirror agent.py's main())
+  - dict.fromkeys() for deduplication in close()
+  - Callable type hint: from collections.abc import Callable
+  - A __repr__ for debugging: f"Session(user_id={self.user_id!r}, turns={self.turn})"
+
+Goal:
+  Understand how stateful objects model a lifecycle (not-started →
+  running → closed). See how try/finally ensures cleanup even on exceptions.
+  Practice writing clean class interfaces where each method has one job.

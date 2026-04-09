@@ -1,0 +1,5 @@
+azure-ai-projects==1.0.0
+azure-identity
+openai
+python-dotenv
+gradio
