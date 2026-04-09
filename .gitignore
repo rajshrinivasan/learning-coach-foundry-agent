@@ -19,6 +19,9 @@ build/
 profiles/*.json
 !profiles/.gitkeep
 
+# Exercises (local only)
+exercises/
+
 # IDE
 .vscode/
 .idea/
